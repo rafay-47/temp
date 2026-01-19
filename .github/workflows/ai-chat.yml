@@ -1,0 +1,238 @@
+name: AI AppSec Chat
+
+on:
+  issue_comment:
+    types: [created]
+
+# Only run on PR comments (not issue comments)
+# and only when the comment contains /aiappsec
+jobs:
+  ai-chat:
+    runs-on: ubuntu-latest
+    name: AI Chat Response
+    
+    # Only run on PR comments that contain /aiappsec
+    if: |
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/aiappsec')
+    
+    permissions:
+      contents: read
+      pull-requests: write
+    
+    steps:
+      - name: Parse Command
+        id: parse
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const comment = context.payload.comment.body;
+            const user = context.payload.comment.user.login;
+            
+            console.log(`Processing command from @${user}: ${comment}`);
+            
+            // Parse the command
+            const match = comment.match(/\/aiappsec\s+(\w+)(?:\s+(.*))?/);
+            
+            if (!match) {
+              core.setOutput('valid', 'false');
+              return;
+            }
+            
+            const command = match[1].toLowerCase();
+            const args = match[2] ? match[2].trim() : '';
+            
+            // Validate command
+            const validCommands = ['explain', 'fix', 'why', 'ask', 'help'];
+            if (!validCommands.includes(command)) {
+              core.setOutput('valid', 'false');
+              core.setOutput('error', `Unknown command: ${command}`);
+              return;
+            }
+            
+            core.setOutput('valid', 'true');
+            core.setOutput('command', command);
+            core.setOutput('args', args);
+            core.setOutput('user', user);
+            
+            // Extract finding number for explain/fix/why
+            if (['explain', 'fix', 'why'].includes(command)) {
+              const findingNum = parseInt(args);
+              if (isNaN(findingNum) || findingNum < 1) {
+                core.setOutput('valid', 'false');
+                core.setOutput('error', `Please specify a finding number. Example: /aiappsec ${command} 1`);
+                return;
+              }
+              core.setOutput('finding_number', findingNum);
+            }
+            
+            // For ask command, the args is the question
+            if (command === 'ask') {
+              if (!args) {
+                core.setOutput('valid', 'false');
+                core.setOutput('error', 'Please provide a question. Example: /aiappsec ask Is this exploitable?');
+                return;
+              }
+              core.setOutput('question', args);
+            }
+      
+      - name: Add Reaction (Processing)
+        if: steps.parse.outputs.valid == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'eyes'
+            });
+      
+      - name: Handle Help Command
+        if: steps.parse.outputs.command == 'help'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const helpMessage = `## AI Security Assistant Commands
+            
+            Use these commands to interact with the AI security reviewer:
+            
+            | Command | Description | Example |
+            |---------|-------------|---------|
+            | \`/aiappsec explain <n>\` | Get detailed explanation of finding #n | \`/aiappsec explain 1\` |
+            | \`/aiappsec fix <n>\` | Get suggested code fix for finding #n | \`/aiappsec fix 1\` |
+            | \`/aiappsec why <n>\` | Understand why finding #n matters | \`/aiappsec why 1\` |
+            | \`/aiappsec ask <question>\` | Ask any security question | \`/aiappsec ask Is this SQL injection exploitable?\` |
+            | \`/aiappsec help\` | Show this help message | \`/aiappsec help\` |
+            
+            ---
+            *AI AppSec PR Reviewer*`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: helpMessage
+            });
+      
+      - name: Call AI Chat API
+        if: steps.parse.outputs.valid == 'true' && steps.parse.outputs.command != 'help'
+        id: chat
+        env:
+          AIAPPSEC_API_URL: ${{ secrets.AI_REVIEW_URL }}
+          AIAPPSEC_API_TOKEN: ${{ secrets.AI_REVIEW_TOKEN }}
+          X_TENANT_ID: ${{ secrets.AI_REVIEW_TENANT_ID }}
+        run: |
+          # Build request payload
+          COMMAND="${{ steps.parse.outputs.command }}"
+          FINDING_NUM="${{ steps.parse.outputs.finding_number }}"
+          QUESTION="${{ steps.parse.outputs.question }}"
+          USER="${{ steps.parse.outputs.user }}"
+          
+          # Create JSON payload
+          PAYLOAD=$(cat <<EOF
+          {
+            "repo_name": "${{ github.repository }}",
+            "pr_number": ${{ github.event.issue.number }},
+            "command": "${COMMAND}",
+            "finding_number": ${FINDING_NUM:-null},
+            "question": ${QUESTION:+\"$QUESTION\"},
+            "github_user": "${USER}"
+          }
+          EOF
+          )
+          
+          # Fix null handling for question
+          if [ -z "$QUESTION" ]; then
+            PAYLOAD=$(echo "$PAYLOAD" | sed 's/"question": ,/"question": null,/')
+          fi
+          
+          echo "Sending request to ${AIAPPSEC_API_URL}/api/chat"
+          
+          # Make the API call
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST "${AIAPPSEC_API_URL}/api/chat" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer ${AIAPPSEC_API_TOKEN}" \
+            -H "X-Tenant-ID: ${X_TENANT_ID}" \
+            -d "$PAYLOAD")
+          
+          # Extract HTTP status code
+          HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          
+          echo "HTTP Status: $HTTP_CODE"
+          
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "error=API returned status $HTTP_CODE" >> $GITHUB_OUTPUT
+            echo "response=Sorry, I encountered an error processing your request. Please try again." >> $GITHUB_OUTPUT
+          else
+            # Extract response from JSON
+            CHAT_RESPONSE=$(echo "$BODY" | python3 -c "import sys, json; print(json.load(sys.stdin).get('response', 'No response'))")
+            
+            # Save response to file to handle multiline
+            echo "$CHAT_RESPONSE" > /tmp/chat_response.md
+            echo "success=true" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Post Response
+        if: steps.parse.outputs.valid == 'true' && steps.parse.outputs.command != 'help'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let responseBody;
+            
+            // Check if we have a response file
+            try {
+              responseBody = fs.readFileSync('/tmp/chat_response.md', 'utf8');
+            } catch (e) {
+              responseBody = `Sorry, I encountered an error processing your request. Please try again.
+              
+              If the problem persists, check:
+              - The AI service is running
+              - Your API credentials are configured correctly
+              - The finding number exists in the review`;
+            }
+            
+            // Add footer
+            responseBody += `\n\n---\n*Response to @${context.payload.comment.user.login}'s \`/aiappsec ${process.env.COMMAND}\` command*`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: responseBody
+            });
+            
+            // Add success reaction
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: context.payload.comment.id,
+              content: 'rocket'
+            });
+        env:
+          COMMAND: ${{ steps.parse.outputs.command }}
+      
+      - name: Post Error
+        if: steps.parse.outputs.valid == 'false' && steps.parse.outputs.error
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const error = `${{ steps.parse.outputs.error }}`;
+            
+            const errorMessage = `**Error:** ${error}
+            
+            Type \`/aiappsec help\` for available commands.
+            
+            ---
+            *AI AppSec PR Reviewer*`;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: errorMessage
+            });

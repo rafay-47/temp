@@ -1,0 +1,430 @@
+name: AI AppSec PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+# Prevent concurrent runs for the same PR
+concurrency:
+  group: ai-security-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  security-review:
+    runs-on: ubuntu-latest
+    name: Security Review
+    
+    # Don't run on draft PRs (they're not ready for review)
+    if: github.event.pull_request.draft == false
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for diff
+      
+      - name: Get PR Diff
+        id: diff
+        run: |
+          # Get the diff between base and head
+          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD)
+          
+          # Save to file to handle multiline content
+          echo "$DIFF" > /tmp/pr_diff.txt
+          
+          # Get diff size for logging
+          DIFF_SIZE=$(wc -c < /tmp/pr_diff.txt)
+          echo "diff_size=$DIFF_SIZE" >> $GITHUB_OUTPUT
+          
+          # Get changed file names for logging (safe to log)
+          CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD | head -20)
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+      
+      - name: Load Repository Policy
+        id: policy
+        run: |
+          # Check if .aiappsec.yml exists in the repo
+          if [ -f ".aiappsec.yml" ]; then
+            echo "Found .aiappsec.yml policy file"
+            POLICY=$(cat .aiappsec.yml)
+            echo "policy_found=true" >> $GITHUB_OUTPUT
+            # Convert YAML to JSON for the API
+            echo "$POLICY" > /tmp/policy.yml
+          elif [ -f ".aiappsec.yaml" ]; then
+            echo "Found .aiappsec.yaml policy file"
+            POLICY=$(cat .aiappsec.yaml)
+            echo "policy_found=true" >> $GITHUB_OUTPUT
+            echo "$POLICY" > /tmp/policy.yml
+          else
+            echo "No policy file found, using defaults"
+            echo "policy_found=false" >> $GITHUB_OUTPUT
+          fi
+      
+      # Extract fingerprints from existing comment BEFORE running review
+      - name: Find Existing Comment and Extract Fingerprints
+        id: find_comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            // Find comment with our hidden marker
+            const marker = '<!-- AI_APPSEC_REVIEW -->';
+            const existingComment = comments.find(comment => 
+              comment.body && comment.body.includes(marker)
+            );
+            
+            let fingerprints = [];
+            
+            if (existingComment) {
+              console.log(`Found existing comment: ${existingComment.id}`);
+              
+              // Try to extract fingerprints from comment
+              const fpMatch = existingComment.body.match(/<!-- FINGERPRINTS:(.*?)-->/);
+              if (fpMatch) {
+                try {
+                  fingerprints = JSON.parse(fpMatch[1]);
+                  console.log(`Extracted ${fingerprints.length} fingerprints for dedup`);
+                } catch (e) {
+                  console.log('Failed to parse fingerprints from comment');
+                }
+              }
+              
+              // Save fingerprints for the review step
+              fs.writeFileSync('/tmp/previous_fingerprints.json', JSON.stringify(fingerprints));
+              
+              return existingComment.id;
+            }
+            
+            console.log('No existing comment found');
+            fs.writeFileSync('/tmp/previous_fingerprints.json', '[]');
+            return '';
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: pip install pyyaml httpx
+      
+      - name: Run Security Review
+        id: review
+        env:
+          AIAPPSEC_API_URL: ${{ secrets.AI_REVIEW_URL }}
+          AIAPPSEC_API_TOKEN: ${{ secrets.AI_REVIEW_TOKEN }}
+          AIAPPSEC_HMAC_SECRET: ${{ secrets.AIAPPSEC_HMAC_SECRET }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python << 'EOF'
+          import os
+          import sys
+          import json
+          import time
+          import hmac
+          import hashlib
+          import yaml
+          import httpx
+          
+          # Configuration
+          api_url = os.environ.get('AIAPPSEC_API_URL', 'http://localhost:8000')
+          api_token = os.environ.get('AIAPPSEC_API_TOKEN', '')
+          hmac_secret = os.environ.get('AIAPPSEC_HMAC_SECRET', '')
+          
+          # Read the diff
+          with open('/tmp/pr_diff.txt', 'r') as f:
+              diff = f.read()
+          
+          if not diff.strip():
+              print("No changes detected in PR")
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write("findings_count=0\n")
+                  f.write("needs_comment=false\n")
+                  f.write("should_block=false\n")
+                  f.write("policy_mode=advisory\n")
+              sys.exit(0)
+          
+          # Load policy if exists
+          policy = None
+          policy_mode = "advisory"  # Default mode
+          fail_on = "HIGH"  # Default fail_on
+          if os.path.exists('/tmp/policy.yml'):
+              with open('/tmp/policy.yml', 'r') as f:
+                  try:
+                      yaml_policy = yaml.safe_load(f)
+                      if yaml_policy:
+                          policy_mode = yaml_policy.get('mode', 'advisory')
+                          fail_on = yaml_policy.get('fail_on', 'HIGH')
+                          policy = {
+                              "mode": policy_mode,
+                              "fail_on": fail_on,
+                              "max_findings": yaml_policy.get('max_findings', 10),
+                              "min_risk": yaml_policy.get('min_risk', 'LOW'),
+                              "min_confidence": yaml_policy.get('min_confidence', 'LOW'),
+                              "blocklist": yaml_policy.get('blocklist', yaml_policy.get('block_paths', [])),
+                              "rules": yaml_policy.get('rules', {}),
+                          }
+                          print(f"Policy loaded: mode={policy_mode}, fail_on={fail_on}")
+                  except yaml.YAMLError as e:
+                      print(f"Warning: Failed to parse policy file: {e}")
+          
+          # Load previous fingerprints from existing comment (for deduplication)
+          previous_fingerprints = []
+          fingerprints_file = '/tmp/previous_fingerprints.json'
+          if os.path.exists(fingerprints_file):
+              try:
+                  with open(fingerprints_file, 'r') as f:
+                      previous_fingerprints = json.load(f)
+                  print(f"Loaded {len(previous_fingerprints)} previous fingerprints for dedup")
+              except:
+                  pass
+          
+          # Build request payload
+          payload = {
+              "repo": "${{ github.repository }}",
+              "pr_number": ${{ github.event.pull_request.number }},
+              "language": "nodejs",  # Could be detected from repo
+              "framework": "express",  # Could be detected from package.json
+              "diff": diff,
+              "previous_fingerprints": previous_fingerprints,
+          }
+          
+          if policy:
+              payload["policy"] = policy
+          
+          # Add HMAC signature if secret is configured
+          headers = {"Content-Type": "application/json"}
+          
+          if api_token:
+              headers["Authorization"] = f"Bearer {api_token}"
+          
+          if hmac_secret:
+              timestamp = int(time.time())
+              # Create payload for signing (without signature fields)
+              sign_payload = json.dumps(payload, sort_keys=True, separators=(',', ':'))
+              message = f"{timestamp}.{sign_payload}".encode('utf-8')
+              signature = hmac.new(
+                  hmac_secret.encode('utf-8'),
+                  message,
+                  hashlib.sha256
+              ).hexdigest()
+              payload["signature"] = signature
+              payload["timestamp"] = timestamp
+          
+          # Make the API request
+          print(f"Sending review request to {api_url}/review-pr")
+          print(f"Diff size: {len(diff)} characters")
+          
+          review_failed = False
+          error_message = ""
+          
+          try:
+              response = httpx.post(
+                  f"{api_url}/review-pr",
+                  json=payload,
+                  headers=headers,
+                  timeout=180.0  # 3 minute timeout for large diffs
+              )
+              response.raise_for_status()
+              result = response.json()
+              
+              findings_count = len(result.get('findings', []))
+              needs_review_count = len(result.get('needs_manual_review', []))
+              findings_hash = result.get('findings_hash', '')
+              markdown = result.get('findings_markdown', '')
+              should_block = result.get('should_block', False)
+              fingerprints = result.get('fingerprints', [])
+              new_count = result.get('new_findings_count', findings_count)
+              still_present = result.get('still_present_count', 0)
+              
+              print(f"Review completed: {findings_count} findings ({new_count} new, {still_present} still present)")
+              print(f"Needs review: {needs_review_count}")
+              print(f"Should block: {should_block}")
+              
+              # Save results
+              with open('/tmp/review_result.json', 'w') as f:
+                  json.dump(result, f)
+              
+              with open('/tmp/comment_body.md', 'w') as f:
+                  f.write(markdown)
+              
+              # Save fingerprints for deduplication in next run
+              with open('/tmp/fingerprints.json', 'w') as f:
+                  json.dump(fingerprints, f)
+              
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"findings_count={findings_count}\n")
+                  f.write(f"new_findings_count={new_count}\n")
+                  f.write(f"still_present_count={still_present}\n")
+                  f.write(f"needs_review_count={needs_review_count}\n")
+                  f.write(f"findings_hash={findings_hash}\n")
+                  f.write(f"needs_comment=true\n")  # Always post a comment now
+                  f.write(f"should_block={'true' if should_block else 'false'}\n")
+                  f.write(f"policy_mode={policy_mode}\n")
+                  f.write(f"fail_on={fail_on}\n")
+                  f.write(f"review_failed=false\n")
+                  
+          except httpx.HTTPStatusError as e:
+              print(f"API error: {e.response.status_code}")
+              review_failed = True
+              error_message = f"HTTP {e.response.status_code}"
+              
+              # Create error comment
+              error_markdown = f"""## 🔒 AI Security Review
+
+<!-- AI_APPSEC_REVIEW -->
+<!-- FINGERPRINTS:[]-->
+
+**⚠️ AI review failed: API error**
+
+**Error:** `{error_message}`
+
+---
+
+💡 Please retry by pushing a new commit or re-running the workflow.
+
+---
+*AI AppSec PR Reviewer*"""
+              
+              with open('/tmp/comment_body.md', 'w') as f:
+                  f.write(error_markdown)
+              
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"findings_count=0\n")
+                  f.write(f"needs_comment=true\n")
+                  f.write(f"should_block=false\n")
+                  f.write(f"policy_mode={policy_mode}\n")
+                  f.write(f"review_failed=true\n")
+                  
+          except httpx.TimeoutException:
+              print("API request timed out")
+              review_failed = True
+              error_message = "timeout"
+              
+              error_markdown = f"""## 🔒 AI Security Review
+
+<!-- AI_APPSEC_REVIEW -->
+<!-- FINGERPRINTS:[]-->
+
+**⏱️ AI review timed out**
+
+The security review request timed out. This may be due to a large diff or service issues.
+
+---
+
+💡 Please retry by pushing a new commit or re-running the workflow.
+
+---
+*AI AppSec PR Reviewer*"""
+              
+              with open('/tmp/comment_body.md', 'w') as f:
+                  f.write(error_markdown)
+              
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"findings_count=0\n")
+                  f.write(f"needs_comment=true\n")
+                  f.write(f"should_block=false\n")
+                  f.write(f"policy_mode={policy_mode}\n")
+                  f.write(f"review_failed=true\n")
+                  
+          except Exception as e:
+              print(f"Error: {type(e).__name__}")
+              review_failed = True
+              error_message = type(e).__name__
+              
+              error_markdown = f"""## 🔒 AI Security Review
+
+<!-- AI_APPSEC_REVIEW -->
+<!-- FINGERPRINTS:[]-->
+
+**⚠️ AI review failed**
+
+An unexpected error occurred during the security review.
+
+**Error Type:** `{error_message}`
+
+---
+
+💡 Please retry by pushing a new commit or re-running the workflow.
+
+---
+*AI AppSec PR Reviewer*"""
+              
+              with open('/tmp/comment_body.md', 'w') as f:
+                  f.write(error_markdown)
+              
+              with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+                  f.write(f"findings_count=0\n")
+                  f.write(f"needs_comment=true\n")
+                  f.write(f"should_block=false\n")
+                  f.write(f"policy_mode={policy_mode}\n")
+                  f.write(f"review_failed=true\n")
+          EOF
+      
+      - name: Create or Update PR Comment
+        if: steps.review.outputs.needs_comment == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const commentBody = fs.readFileSync('/tmp/comment_body.md', 'utf8');
+            const existingCommentId = '${{ steps.find_comment.outputs.result }}';
+            
+            if (existingCommentId && existingCommentId !== '""' && existingCommentId !== '') {
+              // Update existing comment
+              const commentIdNum = parseInt(existingCommentId.replace(/"/g, ''));
+              console.log(`Updating comment ${commentIdNum}`);
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: commentIdNum,
+                body: commentBody
+              });
+            } else {
+              // Create new comment
+              console.log('Creating new comment');
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: commentBody
+              });
+            }
+      
+      - name: Report Status
+        if: always()
+        run: |
+          echo "## Security Review Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.review.outputs.findings_count }}" != "" ]; then
+            echo "- **Findings:** ${{ steps.review.outputs.findings_count }} (${{ steps.review.outputs.new_findings_count }} new, ${{ steps.review.outputs.still_present_count }} still present)" >> $GITHUB_STEP_SUMMARY
+            echo "- **Needs Manual Review:** ${{ steps.review.outputs.needs_review_count }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Findings Hash:** \`${{ steps.review.outputs.findings_hash }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Policy Mode:** ${{ steps.review.outputs.policy_mode }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Fail On:** ${{ steps.review.outputs.fail_on }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Should Block:** ${{ steps.review.outputs.should_block }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- Review did not complete successfully" >> $GITHUB_STEP_SUMMARY
+          fi
+      
+      - name: Enforce Gate (Block PR)
+        if: steps.review.outputs.should_block == 'true' && steps.review.outputs.policy_mode == 'enforce'
+        run: |
+          echo "::error::Security review found vulnerabilities exceeding the fail_on threshold (${{ steps.review.outputs.fail_on }}). PR blocked by enforce mode policy."
+          echo "## ❌ PR Blocked" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "This PR has been blocked due to security findings that meet or exceed the **${{ steps.review.outputs.fail_on }}** risk threshold." >> $GITHUB_STEP_SUMMARY
+          echo "Please address the security issues and push a new commit." >> $GITHUB_STEP_SUMMARY
+          exit 1
