@@ -125,6 +125,7 @@ jobs:
           AIAPPSEC_API_URL: ${{ secrets.AI_REVIEW_URL }}
           AIAPPSEC_API_TOKEN: ${{ secrets.AI_REVIEW_TOKEN }}
           AIAPPSEC_HMAC_SECRET: ${{ secrets.AIAPPSEC_HMAC_SECRET }}
+          AIAPPSEC_TENANT_ID: ${{ secrets.AI_REVIEW_TENANT_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python << 'EOF'
@@ -142,6 +143,7 @@ jobs:
           api_url = os.environ.get('AIAPPSEC_API_URL', 'http://localhost:8000')
           api_token = os.environ.get('AIAPPSEC_API_TOKEN', '')
           hmac_secret = os.environ.get('AIAPPSEC_HMAC_SECRET', '')
+          tenant_id = os.environ.get('AIAPPSEC_TENANT_ID', '')
           
           # Read the diff
           with open('/tmp/pr_diff.txt', 'r') as f:
@@ -209,6 +211,9 @@ jobs:
           
           if api_token:
               headers["Authorization"] = f"Bearer {api_token}"
+          
+          if tenant_id:
+              headers["X-Tenant-ID"] = tenant_id
           
           if hmac_secret:
               timestamp = int(time.time())
