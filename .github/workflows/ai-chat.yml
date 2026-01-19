@@ -94,19 +94,19 @@ jobs:
         with:
           script: |
             const helpMessage = `## AI Security Assistant Commands
-            
-            Use these commands to interact with the AI security reviewer:
-            
-            | Command | Description | Example |
-            |---------|-------------|---------|
-            | \`/aiappsec explain <n>\` | Get detailed explanation of finding #n | \`/aiappsec explain 1\` |
-            | \`/aiappsec fix <n>\` | Get suggested code fix for finding #n | \`/aiappsec fix 1\` |
-            | \`/aiappsec why <n>\` | Understand why finding #n matters | \`/aiappsec why 1\` |
-            | \`/aiappsec ask <question>\` | Ask any security question | \`/aiappsec ask Is this SQL injection exploitable?\` |
-            | \`/aiappsec help\` | Show this help message | \`/aiappsec help\` |
-            
-            ---
-            *AI AppSec PR Reviewer*`;
+
+Use these commands to interact with the AI security reviewer:
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| \`/aiappsec explain <n>\` | Get detailed explanation of finding #n | \`/aiappsec explain 1\` |
+| \`/aiappsec fix <n>\` | Get suggested code fix for finding #n | \`/aiappsec fix 1\` |
+| \`/aiappsec why <n>\` | Understand why finding #n matters | \`/aiappsec why 1\` |
+| \`/aiappsec ask <question>\` | Ask any security question | \`/aiappsec ask Is this SQL injection exploitable?\` |
+| \`/aiappsec help\` | Show this help message | \`/aiappsec help\` |
+
+---
+*AI AppSec PR Reviewer*`;
             
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -189,11 +189,11 @@ jobs:
               responseBody = fs.readFileSync('/tmp/chat_response.md', 'utf8');
             } catch (e) {
               responseBody = `Sorry, I encountered an error processing your request. Please try again.
-              
-              If the problem persists, check:
-              - The AI service is running
-              - Your API credentials are configured correctly
-              - The finding number exists in the review`;
+
+If the problem persists, check:
+- The AI service is running
+- Your API credentials are configured correctly
+- The finding number exists in the review`;
             }
             
             // Add footer
@@ -224,11 +224,11 @@ jobs:
             const error = `${{ steps.parse.outputs.error }}`;
             
             const errorMessage = `**Error:** ${error}
-            
-            Type \`/aiappsec help\` for available commands.
-            
-            ---
-            *AI AppSec PR Reviewer*`;
+
+Type \`/aiappsec help\` for available commands.
+
+---
+*AI AppSec PR Reviewer*`;
             
             await github.rest.issues.createComment({
               owner: context.repo.owner,
