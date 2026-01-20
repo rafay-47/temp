@@ -1,13 +1,12 @@
-app.get('/user', (req, res) => {
-  const userId = req.query.id;
-  const query = `SELECT * FROM users WHERE id = ${userId}`;
-  db.query(query, (err, result) => {
-    res.json(result);
-  });
+const query = 'SELECT * FROM users WHERE id = ?';
+db.query(query, [userId], (err, result) => {
+  // handle result
 });
 
-app.get('/fetch', async (req, res) => {
-  const url = req.query.url;
-  const response = await axios.get(url);
-  res.json(response.data);
-});
+const allowedHosts = ['api.example.com', 'static.example.com'];
+const parsed = new URL(url);
+if (!allowedHosts.includes(parsed.hostname)) {
+  return res.status(400).json({ error: 'Invalid URL' });
+}
+const response = await axios.get(url);
+res.json(response.data);
