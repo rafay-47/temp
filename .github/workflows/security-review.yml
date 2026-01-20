@@ -125,6 +125,7 @@ jobs:
           AIAPPSEC_API_URL: ${{ secrets.AI_REVIEW_URL }}
           AIAPPSEC_API_TOKEN: ${{ secrets.AI_REVIEW_TOKEN }}
           AIAPPSEC_HMAC_SECRET: ${{ secrets.AIAPPSEC_HMAC_SECRET }}
+          AIAPPSEC_TENANT_ID: ${{ secrets.AI_REVIEW_TENANT_ID }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python << 'EOF'
@@ -134,6 +135,7 @@ jobs:
           import time
           import hmac
           import hashlib
+          import textwrap
           import yaml
           import httpx
           
@@ -141,6 +143,7 @@ jobs:
           api_url = os.environ.get('AIAPPSEC_API_URL', 'http://localhost:8000')
           api_token = os.environ.get('AIAPPSEC_API_TOKEN', '')
           hmac_secret = os.environ.get('AIAPPSEC_HMAC_SECRET', '')
+          tenant_id = os.environ.get('AIAPPSEC_TENANT_ID', '')
           
           # Read the diff
           with open('/tmp/pr_diff.txt', 'r') as f:
@@ -208,6 +211,9 @@ jobs:
           
           if api_token:
               headers["Authorization"] = f"Bearer {api_token}"
+          
+          if tenant_id:
+              headers["X-Tenant-ID"] = tenant_id
           
           if hmac_secret:
               timestamp = int(time.time())
@@ -281,21 +287,22 @@ jobs:
               error_message = f"HTTP {e.response.status_code}"
               
               # Create error comment
-              error_markdown = f"""## 🔒 AI Security Review
-
-<!-- AI_APPSEC_REVIEW -->
-<!-- FINGERPRINTS:[]-->
-
-**⚠️ AI review failed: API error**
-
-**Error:** `{error_message}`
-
----
-
-💡 Please retry by pushing a new commit or re-running the workflow.
-
----
-*AI AppSec PR Reviewer*"""
+              error_markdown = textwrap.dedent(f"""\
+                  ## 🔒 AI Security Review
+                  
+                  <!-- AI_APPSEC_REVIEW -->
+                  <!-- FINGERPRINTS:[]-->
+                  
+                  **⚠️ AI review failed: API error**
+                  
+                  **Error:** `{error_message}`
+                  
+                  ---
+                  
+                  💡 Please retry by pushing a new commit or re-running the workflow.
+                  
+                  ---
+                  *AI AppSec PR Reviewer*""")
               
               with open('/tmp/comment_body.md', 'w') as f:
                   f.write(error_markdown)
@@ -312,21 +319,22 @@ jobs:
               review_failed = True
               error_message = "timeout"
               
-              error_markdown = f"""## 🔒 AI Security Review
-
-<!-- AI_APPSEC_REVIEW -->
-<!-- FINGERPRINTS:[]-->
-
-**⏱️ AI review timed out**
-
-The security review request timed out. This may be due to a large diff or service issues.
-
----
-
-💡 Please retry by pushing a new commit or re-running the workflow.
-
----
-*AI AppSec PR Reviewer*"""
+              error_markdown = textwrap.dedent(f"""\
+                  ## 🔒 AI Security Review
+                  
+                  <!-- AI_APPSEC_REVIEW -->
+                  <!-- FINGERPRINTS:[]-->
+                  
+                  **⏱️ AI review timed out**
+                  
+                  The security review request timed out. This may be due to a large diff or service issues.
+                  
+                  ---
+                  
+                  💡 Please retry by pushing a new commit or re-running the workflow.
+                  
+                  ---
+                  *AI AppSec PR Reviewer*""")
               
               with open('/tmp/comment_body.md', 'w') as f:
                   f.write(error_markdown)
@@ -343,23 +351,24 @@ The security review request timed out. This may be due to a large diff or servic
               review_failed = True
               error_message = type(e).__name__
               
-              error_markdown = f"""## 🔒 AI Security Review
-
-<!-- AI_APPSEC_REVIEW -->
-<!-- FINGERPRINTS:[]-->
-
-**⚠️ AI review failed**
-
-An unexpected error occurred during the security review.
-
-**Error Type:** `{error_message}`
-
----
-
-💡 Please retry by pushing a new commit or re-running the workflow.
-
----
-*AI AppSec PR Reviewer*"""
+              error_markdown = textwrap.dedent(f"""\
+                  ## 🔒 AI Security Review
+                  
+                  <!-- AI_APPSEC_REVIEW -->
+                  <!-- FINGERPRINTS:[]-->
+                  
+                  **⚠️ AI review failed**
+                  
+                  An unexpected error occurred during the security review.
+                  
+                  **Error Type:** `{error_message}`
+                  
+                  ---
+                  
+                  💡 Please retry by pushing a new commit or re-running the workflow.
+                  
+                  ---
+                  *AI AppSec PR Reviewer*""")
               
               with open('/tmp/comment_body.md', 'w') as f:
                   f.write(error_markdown)
