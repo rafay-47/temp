@@ -20,9 +20,15 @@ function isUrlSafe(input) {
 if (!isUrlSafe(url)) {
   return res.status(400).json({ error: 'Invalid URL' });
 }
-const response = await axios.get(url, {
-  timeout: 5000,
-  maxRedirects: 0, // prevent redirects
-  validateStatus: null
-});
-// If redirects are required, manually follow them after re‑validating the new URL.
+// Resolve and verify IP right before the request
+const { hostname, protocol } = new URL(url);
+if (!allowedSchemes.has(protocol) || !allowedHosts.has(hostname)) {
+  return res.status(400).json({ error: 'Invalid URL' });
+}
+const ips = await dns.promises.lookup(hostname, { all: true });
+for (const { address } of ips) {
+  if (isPrivateIp(address)) {
+    return res.status(400).json({ error: 'Invalid URL' });
+  }
+}
+const response = await axios.get(url, { timeout: 5000, maxRedirects: 0, validateStatus: null });
