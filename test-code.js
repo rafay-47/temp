@@ -6,7 +6,11 @@ function isUrlSafe(input) {
     const parsed = new URL(input);
     if (!allowedSchemes.has(parsed.protocol)) return false;
     if (!allowedHosts.has(parsed.hostname)) return false;
-    // optional: resolve DNS and ensure IP is not private/internal
+    // Resolve DNS and ensure IP is not private/internal
+    const ips = dns.lookupSync(parsed.hostname, { all: true });
+    for (const { address } of ips) {
+      if (isPrivateIp(address)) return false;
+    }
     return true;
   } catch {
     return false;
