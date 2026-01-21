@@ -1,19 +1,34 @@
-app.get('/fetch', async (req, res) => {
-  const url = req.query.url;
-  const response = await axios.get(url);
-  res.json(response.data);
-});
+const allowedHosts = new Set(['api.example.com', 'static.example.com']);
+const allowedSchemes = new Set(['https:']);
 
-app.post('/webhook-proxy', async (req, res) => {
-  const { targetUrl, payload } = req.body;
-  await axios.post(targetUrl, payload);
-  res.send('Forwarded');
-});
+function isUrlSafe(input) {
+  try {
+    const parsed = new URL(input);
+    if (!allowedSchemes.has(parsed.protocol)) return false;
+    if (!allowedHosts.has(parsed.hostname)) return false;
+    // Resolve DNS and ensure IP is not private/internal
+    const ips = dns.lookupSync(parsed.hostname, { all: true });
+    for (const { address } of ips) {
+      if (isPrivateIp(address)) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-app.post('/search', (req, res) => {
-  const { username, email } = req.body;
-  const sql = `SELECT * FROM users WHERE username = '${username}' OR email = '${email}'`;
-  db.query(sql, (err, results) => {
-    res.json(results);
-  });
-});
+if (!isUrlSafe(url)) {
+  return res.status(400).json({ error: 'Invalid URL' });
+}
+// Resolve and verify IP right before the request
+const { hostname, protocol } = new URL(url);
+if (!allowedSchemes.has(protocol) || !allowedHosts.has(hostname)) {
+  return res.status(400).json({ error: 'Invalid URL' });
+}
+const ips = await dns.promises.lookup(hostname, { all: true });
+for (const { address } of ips) {
+  if (isPrivateIp(address)) {
+    return res.status(400).json({ error: 'Invalid URL' });
+  }
+}
+const response = await axios.get(url, { timeout: 5000, maxRedirects: 0, validateStatus: null });
