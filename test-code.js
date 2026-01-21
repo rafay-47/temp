@@ -20,4 +20,9 @@ function isUrlSafe(input) {
 if (!isUrlSafe(url)) {
   return res.status(400).json({ error: 'Invalid URL' });
 }
-const response = await axios.get(url, { timeout: 5000, validateStatus: null });
+const response = await axios.get(url, {
+  timeout: 5000,
+  maxRedirects: 0, // prevent redirects
+  validateStatus: null
+});
+// If redirects are required, manually follow them after re‑validating the new URL.
