@@ -1,7 +1,5 @@
-function escapeHtml(str) {
-  return str.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-}
 app.get('/search-results', (req, res) => {
-  const query = escapeHtml(req.query.q || '');
+  const query = req.query.q;
+  // Vulnerable: XSS in search results
   res.send(`<div>Search results for: ${query}</div>`);
 });
