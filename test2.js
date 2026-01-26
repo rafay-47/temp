@@ -1,7 +1,7 @@
-app.get('/ping', (req, res) => {
-  const host = req.query.host;
-  // Vulnerable: user input directly in shell command
-  exec(`ping -c 4 ${host}`, (error, stdout) => {
-    res.send(stdout);
+app.post('/convert', (req, res) => {
+  const filename = req.body.filename;
+  // Vulnerable: command injection via filename
+  exec(`ffmpeg -i uploads/${filename} output.mp4`, (err, stdout) => {
+    res.send('Converted');
   });
 });
