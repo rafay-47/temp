@@ -1,7 +1,13 @@
 function escapeHtml(str) {
-  return str.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
-app.get('/search-results', (req, res) => {
-  const query = escapeHtml(req.query.q || '');
-  res.send(`<div>Search results for: ${query}</div>`);
+
+app.get('/profile', (req, res) => {
+  const name = escapeHtml(req.query.name || '');
+  res.send(`<html><body><h1>Welcome, ${name}!</h1></body></html>`);
 });
